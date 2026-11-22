@@ -1,43 +1,63 @@
-// news-image-20261122 v1 — "The Sunday Ledger"
-// Entrypoint: copies the pre-rendered entry.png to /output/entry.png.
-// Node 22 stdlib only. No network, no dependencies.
+// news-image-20261122 v2 — "The Dawn Ledger"
+// Entrypoint: places the pre-rendered entry.png into the grader output
+// directory. Node 22 standard library only; no network, no dependencies.
 //
-// - Refuses to copy an empty or missing source instead of producing a
-//   zero-byte output the grader would score as a blank entry.
-// - Reports the byte count of both files and verifies the copy matches.
-// - Verifies the copied output carries the PNG magic bytes.
-// - Never removes or recreates the output directory: /output is a mount
-//   point in the grader, so it is only created if absent (recursive
-//   mkdir is a no-op when it already exists).
-// - OUTPUT_DIR may override the destination (used for local testing).
-import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+// Safety rules baked in:
+//  - An empty or missing source is refused instead of producing a blank
+//    zero-byte entry the grader would score as nothing.
+//  - The destination directory is only created when absent (recursive
+//    mkdir). It is NEVER deleted or recreated: in the grader /output is
+//    a mount point, and removing it would fail the run.
+//  - After copying, the output is checked twice: its byte count must
+//    equal the source, and its first 8 bytes must be the PNG signature.
+//  - OUTPUT_DIR may override the destination (used for local testing).
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const src = join(here, "entry.png");
-const outDir = process.env.OUTPUT_DIR ?? "/output";
-const dst = join(outDir, "entry.png");
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
 
-const srcStat = statSync(src);
-if (srcStat.size === 0) {
-  throw new Error(`Refusing to copy empty source file: ${src}`);
+function fail(message: string): never {
+  throw new Error(`main.ts: ${message}`);
 }
 
-mkdirSync(outDir, { recursive: true });
-copyFileSync(src, dst);
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const sourcePath = join(scriptDir, "entry.png");
+const targetDir = process.env.OUTPUT_DIR ?? "/output";
+const targetPath = join(targetDir, "entry.png");
 
-const dstStat = statSync(dst);
-if (dstStat.size !== srcStat.size) {
-  throw new Error(
-    `Copy size mismatch: ${src} is ${srcStat.size} bytes but ${dst} is ${dstStat.size} bytes`,
+if (!existsSync(sourcePath)) {
+  fail(`source image missing: ${sourcePath}`);
+}
+
+const sourceInfo = statSync(sourcePath);
+if (sourceInfo.size === 0) {
+  fail(`refusing to copy empty source image: ${sourcePath}`);
+}
+
+const sourceHead = readFileSync(sourcePath).subarray(0, 8);
+if (!sourceHead.equals(PNG_SIGNATURE)) {
+  fail(`source image is not a PNG: ${sourcePath}`);
+}
+
+mkdirSync(targetDir, { recursive: true });
+copyFileSync(sourcePath, targetPath);
+
+const targetInfo = statSync(targetPath);
+if (targetInfo.size !== sourceInfo.size) {
+  fail(
+    `copy size mismatch: source ${sourceInfo.size} bytes, ` +
+      `output ${targetInfo.size} bytes`,
   );
 }
 
-// Verify the copied file is really a PNG (magic bytes), not a truncated write.
-const dstHead = readFileSync(dst).subarray(0, 8);
-const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-if (!dstHead.equals(pngMagic)) {
-  throw new Error(`Output is not a valid PNG: ${dst}`);
+const targetHead = readFileSync(targetPath).subarray(0, 8);
+if (!targetHead.equals(PNG_SIGNATURE)) {
+  fail(`copied output is not a valid PNG: ${targetPath}`);
 }
-console.log(`Copied ${src} -> ${dst} (${dstStat.size} bytes)`);
+
+console.log(
+  `Copied ${sourcePath} -> ${targetPath} (${targetInfo.size} bytes, PNG verified)`,
+);
