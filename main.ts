@@ -1,83 +1,86 @@
-// news-image-20261122 v2 — "The Dawn Ledger"
-// Entrypoint: places the pre-rendered entry.png into the grader output
-// directory. Node 22 standard library only; no network, no dependencies.
+// news-image-20261122 v3 — "The World in One Day"
+// Entrypoint for the grader: copies the pre-rendered entry.png into the
+// output directory and proves the copy is intact.
 //
-// Safety rules baked in:
-//  - An empty or missing source is refused instead of producing a blank
-//    zero-byte entry the grader would score as nothing.
-//  - The destination directory is only created when absent (recursive
-//    mkdir). It is NEVER deleted or recreated: in the grader /output is
-//    a mount point, and removing it would fail the run.
-//  - After copying, the output is checked three ways: its byte count must
-//    equal the source, its first 8 bytes must be the PNG signature, and
-//    its SHA-256 hash must match the source byte for byte.
-//  - OUTPUT_DIR may override the destination (used for local testing).
+// Node 22 standard library only. No network, no dependencies, no clock,
+// no randomness — the same input always produces the same output file.
+//
+// The output directory is created when missing (recursive mkdir). It is
+// NEVER removed: under the grader /output is a mount point, and deleting
+// it would fail the run.
+
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PNG_SIGNATURE = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-]);
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 function fail(message: string): never {
-  throw new Error(`main.ts: ${message}`);
+  console.error(`main.ts: ${message}`);
+  process.exit(1);
 }
 
-function sha256Of(filePath: string): string {
-  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+async function run(): Promise<void> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sourcePath = join(here, "entry.png");
+
+  let source: Buffer;
+  try {
+    source = await readFile(sourcePath);
+  } catch {
+    fail(`cannot read ${sourcePath} — entry.png is missing next to main.ts`);
+  }
+
+  if (source.length === 0) {
+    fail("entry.png is empty; refusing to emit a blank entry");
+  }
+  if (!source.subarray(0, 8).equals(PNG_MAGIC)) {
+    fail("entry.png does not start with the PNG magic bytes");
+  }
+  // The competition requires a 1024x1024 image: read width/height straight
+  // out of the IHDR chunk (bytes 16-23, big-endian) and refuse anything else.
+  if (source.length < 24 || source.subarray(12, 16).toString("ascii") !== "IHDR") {
+    fail("entry.png has no IHDR chunk where a PNG must have one");
+  }
+  const width = source.readUInt32BE(16);
+  const height = source.readUInt32BE(20);
+  if (width !== 1024 || height !== 1024) {
+    fail(`entry.png is ${width}x${height}; the entry must be 1024x1024`);
+  }
+  const expectedDigest = sha256Hex(source);
+
+  const outDir = process.env.OUTPUT_DIR ?? "/output";
+  const destPath = join(outDir, "entry.png");
+
+  await mkdir(outDir, { recursive: true });
+  await writeFile(destPath, source);
+
+  // Verify the copy on disk: same bytes, same digest, same size.
+  const copy = await readFile(destPath);
+  if (copy.length !== source.length) {
+    fail(
+      `copied size mismatch: wrote ${source.length} bytes, ` +
+        `read back ${copy.length} bytes`,
+    );
+  }
+  const actualDigest = sha256Hex(copy);
+  if (actualDigest !== expectedDigest) {
+    fail(
+      `copied digest mismatch: expected ${expectedDigest}, ` +
+        `got ${actualDigest}`,
+    );
+  }
+
+  console.log(`wrote ${destPath}`);
+  console.log(`dimensions: ${width}x${height}`);
+  console.log(`bytes: ${copy.length}`);
+  console.log(`sha256: ${actualDigest}`);
+  console.log("verify: OK (magic bytes, IHDR 1024x1024, size, sha256 all match)");
 }
 
-const scriptDir = dirname(fileURLToPath(import.meta.url));
-const sourcePath = join(scriptDir, "entry.png");
-const targetDir = process.env.OUTPUT_DIR ?? "/output";
-const targetPath = join(targetDir, "entry.png");
-
-if (!existsSync(sourcePath)) {
-  fail(`source image missing: ${sourcePath}`);
-}
-
-const sourceInfo = statSync(sourcePath);
-if (sourceInfo.size === 0) {
-  fail(`refusing to copy empty source image: ${sourcePath}`);
-}
-
-const sourceHead = readFileSync(sourcePath).subarray(0, 8);
-if (!sourceHead.equals(PNG_SIGNATURE)) {
-  fail(`source image is not a PNG: ${sourcePath}`);
-}
-
-mkdirSync(targetDir, { recursive: true });
-copyFileSync(sourcePath, targetPath);
-
-const targetInfo = statSync(targetPath);
-if (targetInfo.size !== sourceInfo.size) {
-  fail(
-    `copy size mismatch: source ${sourceInfo.size} bytes, ` +
-      `output ${targetInfo.size} bytes`,
-  );
-}
-
-const targetHead = readFileSync(targetPath).subarray(0, 8);
-if (!targetHead.equals(PNG_SIGNATURE)) {
-  fail(`copied output is not a valid PNG: ${targetPath}`);
-}
-
-const sourceHash = sha256Of(sourcePath);
-const targetHash = sha256Of(targetPath);
-if (sourceHash !== targetHash) {
-  fail(
-    `copy hash mismatch: source sha256 ${sourceHash}, ` +
-      `output sha256 ${targetHash}`,
-  );
-}
-
-console.log(
-  `Verified copy: source ${sourceInfo.size} bytes, ` +
-    `output ${targetInfo.size} bytes, sha256 ${targetHash}`,
-);
-
-console.log(
-  `Copied ${sourcePath} -> ${targetPath} (${targetInfo.size} bytes, PNG verified)`,
-);
+await run();
